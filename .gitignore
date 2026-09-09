@@ -3,3 +3,5 @@ __pycache__/
 .env
 run_local.bat
 cgv-watch.log
+cgv-watch.err
+state.json

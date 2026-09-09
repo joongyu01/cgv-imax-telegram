@@ -20,6 +20,8 @@
     "seat_watch_seconds": 60,
     "cancel_min_seats": 2,
     "alert_burst": [[5, 0.5], [5, 1.0]],
-    "cancel_alert_burst": [[1, 0]]
+    "cancel_alert_burst": [[1, 0]],
+    "quiet_hours": [0, 6],
+    "quiet_interval": 300
   }
 }

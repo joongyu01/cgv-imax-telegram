@@ -328,6 +328,8 @@ DEFAULT_CONFIG = {
         "cancel_min_seats": 2,
         "alert_burst": [[5, 0.5], [5, 1.0]],
         "cancel_alert_burst": [[1, 0]],
+        "quiet_hours": [0, 6],
+        "quiet_interval": 300,
     },
 }
 
@@ -702,6 +704,21 @@ def check(cfg, state, notify=True, verbose=True):
     return total_new
 
 
+def current_interval(cfg, default):
+    """심야에는 예매 오픈도 취소표도 거의 없으니 폴링을 늦춘다.
+
+    quiet_hours 는 [시작시, 끝시] (한국시간, 끝시는 미포함). [0, 6] 이면
+    00:00~05:59 동안 quiet_interval 초 주기로 돈다.
+    """
+    q = cfg["filters"].get("quiet_hours")
+    if not q or len(q) != 2:
+        return default
+    start, end = int(q[0]), int(q[1])
+    hour = datetime.now(KST).hour
+    inside = start <= hour < end if start < end else (hour >= start or hour < end)
+    return int(cfg["filters"].get("quiet_interval", 300)) if inside else default
+
+
 def main():
     ap = argparse.ArgumentParser(description="CGV 예매 오픈 텔레그램 알림")
     ap.add_argument("--loop", action="store_true", help="상주 실행")
@@ -748,6 +765,7 @@ def main():
         deadline = time.monotonic() + args.duration if args.duration else None
         jitter = max(0.0, min(0.9, args.jitter))
         while True:
+            interval = current_interval(cfg, args.interval)
             try:
                 check(cfg, state)
                 handle_commands(cfg, state)
@@ -756,7 +774,7 @@ def main():
                 print(f"[error] {exc}", file=sys.stderr)
 
             # 매번 똑같은 초에 때리지 않도록 주기를 흔든다.
-            nap = args.interval * random.uniform(1 - jitter, 1 + jitter)
+            nap = interval * random.uniform(1 - jitter, 1 + jitter)
             if deadline and time.monotonic() + nap >= deadline:
                 print("[loop] 지정한 실행 시간에 도달, 종료")
                 return 0

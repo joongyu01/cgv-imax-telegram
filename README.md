@@ -48,7 +48,40 @@ CGV는 자정 넘는 시각을 `25:02` 처럼 24를 넘겨 표기한다.
    https://api.telegram.org/bot<봇토큰>/getUpdates
    ```
 
-## 2. GitHub Actions 로 돌리기 (추천 · 무료)
+## 2. 로컬 상주 실행 (지금 이 방식)
+
+`run_local.bat` 에 토큰을 넣고 실행하면 끝이다. 이 파일은 `.gitignore` 에 걸려 있다.
+
+```bat
+set TELEGRAM_BOT_TOKEN=...
+set TELEGRAM_CHAT_ID=...
+python cgv_watch.py --loop --interval 30 --jitter 0.4
+```
+
+창 없이 백그라운드로 띄우고 로그를 남기려면 PowerShell 에서:
+
+```powershell
+Start-Process python -ArgumentList 'cgv_watch.py','--loop','--interval','30','--jitter','0.4' -WorkingDirectory $PWD -WindowStyle Hidden -RedirectStandardOutput cgv-watch.log -RedirectStandardError cgv-watch.err
+```
+
+멈추려면:
+
+```powershell
+Get-CimInstance Win32_Process -Filter "Name='python.exe'" | Where-Object { $_.CommandLine -like '*cgv_watch*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+```
+
+로그인할 때 자동으로 뜨게 하려면 `Win+R` → `shell:startup` 폴더에 `run_local.bat`
+바로가기를 넣으면 된다.
+
+**PC가 꺼져 있으면 감시도 멈춘다.** 그동안 열린 회차는 다음 실행 때 "신규"로
+잡혀 알림이 오므로 놓치지는 않지만, 그만큼 늦는다.
+
+## 3. GitHub Actions 로 돌리기 (지금은 꺼져 있음)
+
+`.github/workflows/watch.yml` 의 `schedule` 이 주석 처리되어 **자동 실행은 꺼져 있다.**
+Actions 탭에서 수동으로 `Run workflow` 를 눌렀을 때만 돈다. 되살리려면 주석을 풀면 된다.
+
+크론으로 돌릴 때의 한계는 아래에 적어 둔다.
 
 1. 이 저장소를 본인 계정으로 fork 하거나 그대로 push 한다.
 2. **Settings → Secrets and variables → Actions → New repository secret** 에 두 개 등록:
@@ -68,15 +101,7 @@ CGV는 자정 넘는 시각을 `25:02` 처럼 24를 넘겨 표기한다.
 > 밀린 실행은 취소하지 않고 줄을 세우므로(`cancel-in-progress: false`), 지연이 생겨도
 > 대기 중이던 잡이 이어 돌면서 빈 시간을 메운다.
 
-## 3. 내 서버 / 라즈베리파이에서 상주 실행
-
-```bash
-export TELEGRAM_BOT_TOKEN=...
-export TELEGRAM_CHAT_ID=...
-python cgv_watch.py --loop --interval 30
-```
-
-도커:
+## 4. 도커로 돌리기
 
 ```bash
 docker build -t cgv-imax-telegram .
@@ -174,6 +199,9 @@ HTTP 레벨에서 직접 측정한 값이다.
 | 180 | 21 MB | 0.6 GB |
 | 300 | 17 MB | 0.5 GB |
 
+심야에는 예매 오픈도 취소표도 거의 없으므로 `quiet_hours` 로 00~06시는 5분 주기로
+늦춘다. 그만큼 하루 사용량이 더 줄어든다.
+
 `--interval` 을 60초로 늘려도 별 차이가 없다. 평소 주기 요청은 1.4 KB뿐이라 거의 공짜고,
 데이터를 쓰는 건 좌석 확인이기 때문이다. **줄이려면 `seat_watch_seconds` 를 올려라.**
 
@@ -226,6 +254,8 @@ TimeoutError: The read operation timed out
     "cancel_min_seats": 2,
     "alert_burst": [[5, 0.5], [5, 1.0]],
     "cancel_alert_burst": [[1, 0]],
+    "quiet_hours": [0, 6],
+    "quiet_interval": 300,
     "fail_alert_after": 3,
     "request_gap": [0.4, 1.6]
   }
@@ -247,6 +277,8 @@ TimeoutError: The read operation timed out
 | `cancel_min_seats` | 잔여석이 한 번에 몇 석 늘면 취소표로 볼지 |
 | `alert_burst` | 예매 오픈 알림 반복 방식. `[[횟수, 간격초], ...]` |
 | `cancel_alert_burst` | 취소표 알림 반복 방식. 기본은 1회 |
+| `quiet_hours` | 폴링을 늦출 시간대 `[시작시, 끝시]` (한국시간, 끝시 미포함) |
+| `quiet_interval` | 그 시간대의 폴링 주기(초) |
 
 CGV는 자정 넘는 심야 회차를 **`2530` = 새벽 1시 30분** 처럼 24를 넘겨 표기한다.
 기본 설정은 `2359` 까지라 심야 회차가 빠지는데, 심야도 받고 싶으면 `start_time_to` 를
