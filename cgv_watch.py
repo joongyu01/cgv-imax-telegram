@@ -216,6 +216,17 @@ def format_show(show):
             f"{show.get('scnsNm', '')} [{show.get('movkndDsplNm', '')}]{tail}")
 
 
+def show_tag(shows):
+    """팝업 첫 줄에 넣을 짧은 회차 표시. 예: 9/10(목), 21:30"""
+    if not shows:
+        return None
+    s = shows[0]
+    d = parse_ymd(s["scnYmd"])
+    tag = (f"{d.month}/{d.day}({WEEKDAY_KO[d.weekday()]}), "
+           f"{hhmm(s.get('scnsrtTm'))}")
+    return tag + (f" 외 {len(shows) - 1}건" if len(shows) > 1 else "")
+
+
 def format_show_long(show):
     """텔레그램용. 날짜와 시작 시각을 앞에 굵게 세운다."""
     d = parse_ymd(show["scnYmd"])
@@ -283,25 +294,22 @@ def telegram_call(method, cfg, **fields):
         time.sleep(3)
 
 
-def telegram_send(text, cfg):
-    """보낸 시각과 머리말을 앞에 붙여 보낸다.
+def telegram_send(text, cfg, subject=None):
+    """첫 줄에 어느 회차 표인지와 머리말을 나란히 세워 보낸다.
 
-    시각이 있으면 반복 알림 열 통이 같은 내용이어도 구분이 되고, 나중에
-    올려 봐도 언제 온 알림인지 바로 안다.
+    폰 잠금화면 팝업은 첫 줄만 보여 준다. 거기에 상영 날짜와 시각이
+    들어가 있어야 열어 보지 않고도 무슨 표인지 안다.
     """
     _, chat_id = telegram_creds(cfg)
-    now = datetime.now(KST)
-    lines = [f"({now.strftime('%Y-%m-%d')}({WEEKDAY_KO[now.weekday()]}), "
-             f"{now.strftime('%H:%M:%S')})"]
-    header = cfg.get("message_header")
-    if header:
-        lines.append(f"<b>{header}</b>")
-    text = "\n".join(lines) + f"\n\n{text}"
+    head = " ".join(p for p in (f"({subject})" if subject else "",
+                                f"<b>{cfg.get('message_header') or ''}</b>"
+                                if cfg.get("message_header") else "") if p)
+    text = f"{head}\n\n{text}" if head else text
     return telegram_call("sendMessage", cfg, chat_id=chat_id, text=text,
                          parse_mode="HTML", disable_web_page_preview="true")
 
 
-def telegram_alert(text, cfg, burst_key="alert_burst"):
+def telegram_alert(text, cfg, burst_key="alert_burst", subject=None):
     """놓치면 안 되는 알림은 여러 번 연달아 보내 확실히 깨운다.
 
     burst 설정은 [[횟수, 간격초], ...] 형태. 예매 오픈은 놓치면 끝이라
@@ -315,7 +323,7 @@ def telegram_alert(text, cfg, burst_key="alert_burst"):
     for count, gap in burst:
         for _ in range(int(count)):
             try:
-                telegram_send(text, cfg)
+                telegram_send(text, cfg, subject=subject)
                 sent += 1
             except Exception as exc:
                 print(f"[warn] 반복 알림 {sent + 1}번째 실패: {exc}", file=sys.stderr)
@@ -1005,7 +1013,7 @@ def check(cfg, state, notify=True, verbose=True):
                 lines.append(f"<i>(조건 밖 회차 {len(miss)}개는 생략)</i>")
             lines.append("")
             lines.append(f'<a href="{BOOKING_URL}">CGV 예매하기</a>')
-            telegram_alert("\n".join(lines), cfg)
+            telegram_alert("\n".join(lines), cfg, subject=show_tag(fresh))
             total_new += len(fresh)
 
         if cancels:
@@ -1016,7 +1024,8 @@ def check(cfg, state, notify=True, verbose=True):
                              f"→ 현재 {free}석 남음")
             lines.append("")
             lines.append(f'<a href="{BOOKING_URL}">CGV 예매하기</a>')
-            telegram_alert("\n".join(lines), cfg, burst_key="cancel_alert_burst")
+            telegram_alert("\n".join(lines), cfg, burst_key="cancel_alert_burst",
+                           subject=show_tag([s for s, _d, _f in cancels]))
             total_new += len(cancels)
 
     return total_new
