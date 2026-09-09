@@ -284,10 +284,19 @@ def telegram_call(method, cfg, **fields):
 
 
 def telegram_send(text, cfg):
+    """보낸 시각과 머리말을 앞에 붙여 보낸다.
+
+    시각이 있으면 반복 알림 열 통이 같은 내용이어도 구분이 되고, 나중에
+    올려 봐도 언제 온 알림인지 바로 안다.
+    """
     _, chat_id = telegram_creds(cfg)
+    now = datetime.now(KST)
+    lines = [f"({now.strftime('%Y-%m-%d')}({WEEKDAY_KO[now.weekday()]}), "
+             f"{now.strftime('%H:%M:%S')})"]
     header = cfg.get("message_header")
     if header:
-        text = f"<b>{header}</b>\n\n{text}"
+        lines.append(f"<b>{header}</b>")
+    text = "\n".join(lines) + f"\n\n{text}"
     return telegram_call("sendMessage", cfg, chat_id=chat_id, text=text,
                          parse_mode="HTML", disable_web_page_preview="true")
 
