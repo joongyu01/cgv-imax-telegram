@@ -478,13 +478,13 @@ def report_recovery(label, cfg, state, notify):
 # --------------------------------------------------------------------------
 
 COMMANDS = [
+    # 메뉴에서 누르면 곧바로 전송되므로, 인자가 필요 없는 형태로 등록한다.
     ("status", "감시 상태와 CGV API 정상 여부"),
     ("list", "지금 조건에 맞는 회차 목록"),
     ("settings", "현재 설정 보기"),
-    ("late", "22시 이후 회차 추적 on/off"),
-    ("repeat", "취소표 알림 반복 횟수"),
-    ("window", "조회 시간대 변경"),
-    ("set", "그 밖의 값 바꾸기"),
+    ("late_off", "22시 이후 회차 추적 끄기"),
+    ("late_on", "22시 이후 회차 추적 켜기"),
+    ("set", "바꿀 수 있는 값 목록"),
     ("reset", "바꾼 설정 되돌리기"),
     ("help", "명령 목록"),
 ]
@@ -495,10 +495,14 @@ HELP_TEXT = (
     "/list — 지금 조건에 맞는 회차 목록\n"
     "/settings — 현재 설정 보기\n\n"
     "<b>설정 바꾸기</b>\n"
-    "/late off — 22시 이후 회차는 추적하지 않음\n"
-    "/late on — 다시 추적\n"
-    "/repeat 3 — 취소표 알림을 3번 보냄 (1~20)\n"
-    "/window 1900 2359 — 조회 시간대를 19:00~23:59 로\n\n"
+    "값은 <b>언더바</b>로 이어 붙인다. 메뉴에서 명령을 누르면 곧바로 전송돼\n"
+    "버려서 인자를 붙일 틈이 없기 때문이다. 띄어쓰기 형태도 동작한다.\n\n"
+    "/late_off — 22시 이후 회차는 추적하지 않음\n"
+    "/late_on — 다시 추적\n"
+    "/repeat_3 — 취소표 알림을 3번 보냄 (1~20)\n"
+    "/window_1900_2359 — 조회 시간대를 19:00~23:59 로\n"
+    "/set — 주기·요일·상영관 등 나머지 값 (목록이 나온다)\n"
+    "/reset — 바꾼 설정 되돌리기\n\n"
     "바꾼 설정은 저장되어 다시 켜도 유지된다.")
 
 # 사용자가 봇으로 바꾼 값. config.json 위에 덮어씌운다.
@@ -632,10 +636,12 @@ def set_help():
     lines = ["<b>/set 으로 바꿀 수 있는 값</b>", ""]
     f = DEFAULT_CONFIG["filters"]
     for name, (key, _p, desc, _s) in SETTINGS.items():
-        lines.append(f"<code>/set {name}</code> — {desc}")
-    lines += ["", "예) <code>/set interval 60</code> · <code>/set seat 120</code> · "
-              "<code>/set weekdays 0,1,2,3,4</code> · <code>/set halls IMAX</code>",
-              "", "<code>/reset</code> 전체 되돌리기 · <code>/reset seat</code> 하나만"]
+        lines.append(f"<code>/set_{name}_값</code> — {desc}")
+    lines += ["", "예) <code>/set_interval_60</code> · <code>/set_seat_120</code> · "
+              "<code>/set_weekdays_0,1,2,3,4</code> · <code>/set_halls_IMAX</code> · "
+              "<code>/set_quiet_0_6</code>",
+              "", "<code>/set_interval</code> 처럼 값을 빼면 지금 값을 알려준다.",
+              "<code>/reset</code> 전체 되돌리기 · <code>/reset_seat</code> 하나만"]
     return "\n".join(lines)
 
 
@@ -653,7 +659,7 @@ def apply_setting(cmd, args, cfg, state):
         key, parse, desc, show = SETTINGS[name]
         if len(args) == 1:
             return (f"{desc} · 현재 <b>{show(f.get(key))}</b>\n"
-                    f"<code>/set {name} 값</code> 으로 바꾸세요.")
+                    f"<code>/set_{name}_값</code> 으로 바꾸세요.")
         try:
             value = parse(args[1:])
         except ValueError as exc:
@@ -678,7 +684,7 @@ def apply_setting(cmd, args, cfg, state):
         if arg not in ("on", "off"):
             now = "ON" if int(f["start_time_to"]) >= 2200 else "OFF"
             return (f"22시 이후 회차 추적은 지금 <b>{now}</b> 입니다.\n"
-                    "<code>/late on</code> 또는 <code>/late off</code>")
+                    "<code>/late_on</code> 또는 <code>/late_off</code>")
         if arg == "off":
             ov["start_time_to"] = LATE_CUTOFF
             return ("22시 이후 회차는 이제 <b>추적하지 않습니다.</b>\n"
@@ -773,20 +779,25 @@ def list_text(cfg, state):
     return "\n".join(lines) or "감시 대상이 없습니다."
 
 
-def handle_commands(cfg, state):
-    """텔레그램에 들어온 명령에 답한다. 등록된 chat_id 외에는 무시."""
+def handle_commands(cfg, state, wait=0):
+    """텔레그램에 들어온 명령에 답한다. 등록된 chat_id 외에는 무시.
+
+    wait 를 주면 롱폴링이 된다. 텔레그램이 그 시간만큼 연결을 붙들고 있다가
+    메시지가 오는 순간 바로 돌려주므로, 조회 주기와 상관없이 즉시 답할 수 있다.
+    """
     try:
         _, my_chat = telegram_creds(cfg)
     except RuntimeError:
-        return
+        return 0
 
+    handled = 0
     offset = state.get("_tg_offset", 0)
     try:
-        res = telegram_call("getUpdates", cfg, offset=offset, timeout=0,
+        res = telegram_call("getUpdates", cfg, offset=offset, timeout=int(wait),
                             allowed_updates=json.dumps(["message"]))
     except Exception as exc:
         print(f"[error] getUpdates 실패: {exc}", file=sys.stderr)
-        return
+        raise
 
     for upd in res.get("result", []):
         state["_tg_offset"] = upd["update_id"] + 1
@@ -796,20 +807,58 @@ def handle_commands(cfg, state):
         if str((msg.get("chat") or {}).get("id")) != my_chat or not text.startswith("/"):
             continue
 
-        cmd = text[1:].split("@")[0].split()[0].lower()
-        print(f"[cmd] /{cmd}")
+        # 텔레그램은 메뉴에서 명령을 누르면 곧바로 보내 버려서 인자를 붙일
+        # 틈이 없다. 그래서 /set_interval_60 처럼 언더바로 이어 붙인 형태를
+        # 기본으로 받는다. 띄어쓰기 형태도 그대로 동작한다.
+        parts = text[1:].split()
+        head = parts[0].split("@")[0].lower().split("_")
+        cmd = head[0]
+        args = [a for a in head[1:] if a] + parts[1:]
+        print(f"[cmd] /{cmd} {' '.join(args)}".rstrip())
         try:
             if cmd == "status":
                 reply = status_text(cfg, state)
             elif cmd in ("list", "now"):
                 reply = list_text(cfg, state)
+            elif cmd == "settings":
+                reply = settings_text(cfg, state)
+            elif cmd in ("set", "reset", "late", "repeat", "window"):
+                reply = apply_setting(cmd, args, cfg, state)
             elif cmd in ("help", "start"):
                 reply = HELP_TEXT
             else:
                 reply = f"모르는 명령입니다.\n\n{HELP_TEXT}"
             telegram_send(reply, cfg)
+            handled += 1
         except Exception as exc:
             print(f"[error] /{cmd} 처리 실패: {exc}", file=sys.stderr)
+            try:
+                telegram_send(f"⚠️ <code>/{cmd}</code> 처리 중 오류\n"
+                              f"<code>{type(exc).__name__}: {exc}</code>", cfg)
+            except Exception:
+                pass
+
+    return handled
+
+
+def wait_for_commands(cfg, state, seconds):
+    """다음 조회까지 기다리는 동안 텔레그램을 롱폴링한다.
+
+    그냥 sleep 하면 명령에 답하는 데 최대 한 주기(30초)가 걸린다. 대기 시간을
+    롱폴링으로 채우면 메시지가 오는 즉시 깨어나 1초 안에 답한다.
+    """
+    deadline = time.monotonic() + seconds
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 1:
+            if left > 0:
+                time.sleep(left)
+            return
+        try:
+            if handle_commands(cfg, state, wait=int(min(25, left))):
+                save_state(state)
+        except Exception:
+            time.sleep(min(5, max(0.0, deadline - time.monotonic())))
 
 
 def check(cfg, state, notify=True, verbose=True):
@@ -996,7 +1045,6 @@ def main():
             interval = current_interval(with_overrides(cfg, state), args.interval)
             try:
                 check(cfg, state)
-                handle_commands(cfg, state)
                 save_state(state)
             except Exception as exc:
                 print(f"[error] {exc}", file=sys.stderr)
@@ -1006,8 +1054,8 @@ def main():
             if deadline and time.monotonic() + nap >= deadline:
                 print("[loop] 지정한 실행 시간에 도달, 종료")
                 return 0
-            print(f"[loop] {nap:.1f}초 대기")
-            time.sleep(nap)
+            print(f"[loop] {nap:.1f}초 대기 (그동안 봇 명령은 즉시 응답)")
+            wait_for_commands(cfg, state, nap)
 
     state = load_state()
     check(cfg, state)

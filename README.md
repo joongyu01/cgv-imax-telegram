@@ -120,28 +120,35 @@ docker run -d --restart=always \
 | `/status` | CGV API가 지금 살아 있는지 실제로 찔러 보고, 마지막 조회 시각·연속 실패를 보여준다 |
 | `/list` | 지금 조건에 맞는 회차 전체 |
 | `/settings` | 현재 설정 보기 |
-| `/late off` `/late on` | 22시 이후 회차 추적 끄기/켜기 |
-| `/repeat 3` | 취소표 알림을 3번 보냄 (1~20) |
-| `/window 1900 2359` | 조회 시간대 변경 |
+| `/late_off` `/late_on` | 22시 이후 회차 추적 끄기/켜기 |
+| `/repeat_3` | 취소표 알림을 3번 보냄 (1~20) |
+| `/window_1900_2359` | 조회 시간대 변경 |
 | `/set` | 나머지 값 전부 (목록은 `/set` 만 보내면 나온다) |
-| `/reset` | 바꾼 설정 되돌리기. `/reset seat` 처럼 하나만도 가능 |
+| `/reset` | 바꾼 설정 되돌리기. `/reset_seat` 처럼 하나만도 가능 |
 | `/help` | 명령 목록 |
 
 `/set` 으로 바꿀 수 있는 값:
 
 | 항목 | 뜻 | 예 |
 | --- | --- | --- |
-| `interval` | 폴링 주기(초) | `/set interval 60` |
-| `seat` | 좌석 확인 주기(초) | `/set seat 120` |
-| `full` | 전체 스윕 주기(초) | `/set full 300` |
-| `minseats` | 취소표 판단 기준(석) | `/set minseats 2` |
-| `from` `until` | 조회 시작·종료 시각 | `/set until 2159` |
-| `weekdays` | 감시 요일 (월=0) | `/set weekdays 0,1,2,3,4` |
-| `halls` | 상영관 키워드 | `/set halls IMAX` |
-| `repeat` `openrepeat` | 취소표·예매 오픈 알림 횟수 | `/set openrepeat 10` |
-| `quiet` `quietinterval` | 저속 시간대와 그 주기 | `/set quiet 0 6` |
-| `failafter` | 장애 알림 기준(연속 실패) | `/set failafter 3` |
-| `gap` | 요청 간 대기(초) | `/set gap 0.4 1.6` |
+| `interval` | 폴링 주기(초) | `/set_interval_60` |
+| `seat` | 좌석 확인 주기(초) | `/set_seat_120` |
+| `full` | 전체 스윕 주기(초) | `/set_full_300` |
+| `minseats` | 취소표 판단 기준(석) | `/set_minseats_2` |
+| `from` `until` | 조회 시작·종료 시각 | `/set_until_2159` |
+| `weekdays` | 감시 요일 (월=0) | `/set_weekdays_0,1,2,3,4` |
+| `halls` | 상영관 키워드 | `/set_halls_IMAX` |
+| `repeat` `openrepeat` | 취소표·예매 오픈 알림 횟수 | `/set_openrepeat_10` |
+| `quiet` `quietinterval` | 저속 시간대와 그 주기 | `/set_quiet_0_6` |
+| `failafter` | 장애 알림 기준(연속 실패) | `/set_failafter_3` |
+| `gap` | 요청 간 대기(초) | `/set_gap_0.4_1.6` |
+
+값은 **언더바로 이어 붙인다.** 텔레그램은 메뉴에서 명령을 누르면 곧바로 전송해 버려서
+인자를 덧붙일 틈이 없기 때문이다. `/set interval 60` 처럼 띄어 써도 동작한다.
+`/set_interval` 처럼 값을 빼면 지금 값을 알려준다.
+
+명령은 **1초 안에** 답이 온다. 조회 주기가 끝나기를 기다리지 않고, 대기 시간을
+텔레그램 롱폴링(`getUpdates` 의 `timeout`)으로 채워 메시지가 오는 즉시 깨어난다.
 
 봇으로 바꾼 값은 `state.json` 에 저장되어 **다시 켜도 유지된다.** `config.json` 은
 건드리지 않으므로 `/reset` 하면 원래 값으로 돌아간다.
