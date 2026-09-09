@@ -143,6 +143,7 @@ docker run -d --restart=always \
 | `halls` | 상영관 키워드 | `/set_halls_IMAX` |
 | `repeat` `openrepeat` | 취소표·예매 오픈 알림 횟수 | `/set_openrepeat_10` |
 | `quiet` `quietinterval` | 저속 시간대와 그 주기 | `/set_quiet_0_6` |
+| `dates` | 상영일 목록 조회 주기(초) | `/set_dates_30` |
 | `failafter` | 장애 알림 기준(연속 실패) | `/set_failafter_3` |
 | `gap` | 요청 간 대기(초) | `/set_gap_0.4_1.6` |
 
@@ -197,9 +198,11 @@ CGV API에는 공개된 호출 한도가 없다(비공식 엔드포인트라 공
 rate-limit 헤더도 없다. 하지만 앞단이 Cloudflare라 과하게 때리면 차단될 수 있으므로,
 요청 수를 두 가지 방법으로 줄였다.
 
-- **상영일 목록만 매 주기 확인한다.** `searchSiteScnscYmdListByMov` 한 번이면 그 영화의
-  상영일이 통째로 나온다. 예매가 새로 열리면 여기에 날짜가 늘어난다. 그래서 평소 한 주기는
-  **요청 1건**이고, 새 날짜가 보일 때만 그 날짜의 회차를 가져온다.
+- **감시 대상 날짜만 본다.** 조건에 맞는 회차가 있는 날짜(지금은 4일)만 잔여석을 확인한다.
+  상영일 전체(6~7일)를 매번 훑지 않는다.
+- **상영일 목록은 캐싱한다**(`dates_check_seconds`, 기본 30초). 이 목록은 새 날짜가
+  열릴 때나 바뀌는데, 주기가 5초면 하루 17,280번을 받게 된다. 30초로 묶어 하루
+  2,880번으로 줄였다. 하루 14,400건이 그냥 버려지던 호출이었다.
 - **1분마다 감시 대상 날짜만 본다**(`seat_watch_seconds`). 취소표 감지용이자, 그 날짜에
   회차가 추가되는 것도 같이 잡는다. 지금 조건이면 4건.
 - **5분마다 한 번은 전체를 훑는다**(`full_sweep_seconds`). 아직 감시 대상이 없는 날짜에
@@ -310,6 +313,8 @@ TimeoutError: The read operation timed out
 | `fail_alert_after` | 연속 몇 회 실패하면 장애 알림을 보낼지 |
 | `request_gap` | 요청 사이 무작위 대기 범위(초) |
 | `seat_watch_seconds` | 취소표 확인 주기(초) |
+| `dates_check_seconds` | 상영일 목록 조회 주기(초) |
+| `poll_interval` | 폴링 주기(초) |
 | `cancel_min_seats` | 잔여석이 한 번에 몇 석 늘면 취소표로 볼지 |
 | `alert_burst` | 예매 오픈 알림 반복 방식. `[[횟수, 간격초], ...]` |
 | `cancel_alert_burst` | 취소표 알림 반복 방식. 기본은 1회 |

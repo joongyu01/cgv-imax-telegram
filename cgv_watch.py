@@ -336,8 +336,10 @@ DEFAULT_CONFIG = {
         "start_time_to": "2359",
         "full_sweep_seconds": 120,
         "fail_alert_after": 3,
-        "request_gap": [0.4, 1.6],
-        "seat_watch_seconds": 30,
+        "request_gap": [0.1, 0.4],
+        "poll_interval": 5,
+        "seat_watch_seconds": 5,
+        "dates_check_seconds": 30,
         "cancel_min_seats": 2,
         "alert_burst": [[5, 0.5], [5, 1.0]],
         "cancel_alert_burst": [[1, 0]],
@@ -407,14 +409,18 @@ def resolve_target(target):
     return target
 
 
-def collect(target, cfg, skip_dates=None):
+def collect(target, cfg, skip_dates=None, dates=None):
     """상영 회차를 (조건 통과, 조건 탈락, 전체 상영일) 로 반환.
 
-    상영일 목록 조회는 1회로 끝나므로 매 주기 호출해도 부담이 없다. 반면
     날짜별 회차 조회는 상영일 수만큼 요청이 나가므로, 평소에는 skip_dates
     (이미 확인한 날짜) 를 빼고 새로 생긴 날짜만 확인한다.
+
+    dates 를 넘기면 상영일 목록 조회를 건너뛴다. 주기를 몇 초로 당기면 이
+    한 건도 무시할 수 없는데, 상영일 목록은 새 날짜가 열릴 때나 바뀌므로
+    매번 다시 받을 이유가 없다.
     """
-    dates = screening_dates(target["site_no"], target["mov_no"])
+    if dates is None:
+        dates = screening_dates(target["site_no"], target["mov_no"])
     scan = dates if skip_dates is None else [d for d in dates if d not in skip_dates]
 
     hit, miss = [], []
@@ -432,12 +438,13 @@ def load_entry(state, label):
         return None
     # 예전 형식: {회차키: 시각} 이 그대로 들어 있던 경우
     if entry and all(isinstance(v, str) for v in entry.values()):
-        return {"dates": [], "last_full": 0, "last_seat": 0,
+        return {"dates": [], "last_full": 0, "last_seat": 0, "last_dates": 0,
                 "seen": dict(entry), "seats": {}}
     return {
         "dates": entry.get("dates") or [],
         "last_full": entry.get("last_full") or 0,
         "last_seat": entry.get("last_seat") or 0,
+        "last_dates": entry.get("last_dates") or 0,
         "seen": entry.get("seen") or {},
         "seats": entry.get("seats") or {},
     }
@@ -634,8 +641,8 @@ def _fmt_days(v):
 
 SETTINGS = {
     # 이름:      (필터 키,               파서,             설명,                      표시 함수)
-    "interval":   ("poll_interval",      _int(10, 3600),  "폴링 주기(초)",            str),
-    "seat":       ("seat_watch_seconds", _int(15, 3600),  "좌석 확인 주기(초)",        str),
+    "interval":   ("poll_interval",      _int(3, 3600),  "폴링 주기(초)",            str),
+    "seat":       ("seat_watch_seconds", _int(3, 3600),  "좌석 확인 주기(초)",        str),
     "full":       ("full_sweep_seconds", _int(60, 86400), "전체 스윕 주기(초)",        str),
     "minseats":   ("cancel_min_seats",   _int(1, 50),     "취소표 판단 기준(석)",      str),
     "from":       ("start_time_from",    _hhmm_arg,       "조회 시작 시각",            _fmt_time),
@@ -646,6 +653,7 @@ SETTINGS = {
     "openrepeat": ("alert_burst",        _burst,          "예매 오픈 알림 횟수",       _burst_count),
     "quiet":      ("quiet_hours",        _hours,          "저속 시간대(시)",           lambda v: f"{v[0]}~{v[1]}시"),
     "quietinterval": ("quiet_interval",  _int(30, 3600),  "저속 시간대 주기(초)",      str),
+    "dates":      ("dates_check_seconds", _int(5, 3600),  "상영일 목록 조회 주기(초)",  str),
     "failafter":  ("fail_alert_after",   _int(1, 20),     "장애 알림 기준(연속 실패)",  str),
     "gap":        ("request_gap",        _gap,            "요청 간 대기(초)",          lambda v: f"{v[0]}~{v[1]}"),
 }
@@ -909,8 +917,14 @@ def check(cfg, state, notify=True, verbose=True):
         else:
             known = set(entry["dates"])        # 새로 생긴 날짜만
 
+        # 상영일 목록은 새 날짜가 열릴 때만 바뀌므로 매 주기 다시 받지 않는다.
+        dates_due = entry is None or (
+            now_ts - entry["last_dates"] >= int(f.get("dates_check_seconds", 30)))
+        cached_dates = None if dates_due else list(entry["dates"])
+
         try:
-            hit, miss, dates = collect(target, cfg, skip_dates=known)
+            hit, miss, dates = collect(target, cfg, skip_dates=known,
+                                       dates=cached_dates)
         except Exception as exc:
             print(f"[error] {label}: {exc}", file=sys.stderr)
             report_failure(label, exc, cfg, state, notify)
@@ -961,6 +975,8 @@ def check(cfg, state, notify=True, verbose=True):
                 "last_full": now_ts if full else (entry["last_full"] if entry else 0),
                 "last_seat": (now_ts if (full or seat_due)
                               else (entry["last_seat"] if entry else 0)),
+                "last_dates": (now_ts if dates_due
+                               else (entry["last_dates"] if entry else 0)),
                 "seen": seen,
                 "seats": {k: v for k, v in seats.items() if k in keep},
             }
