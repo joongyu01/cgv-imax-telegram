@@ -19,6 +19,7 @@ import json
 import os
 import random
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -49,6 +50,13 @@ REQUEST_GAP = [0.4, 1.6]
 _last_call = 0.0
 
 
+def log(*parts):
+    """어느 스레드가 언제 찍었는지 알 수 있게 시각을 붙인다."""
+    stamp = datetime.now(KST).strftime("%H:%M:%S")
+    who = "cmd" if threading.current_thread().name == "commands" else "watch"
+    print(f"{stamp} [{who}]", *parts, flush=True)
+
+
 def _throttle():
     global _last_call
     wait = _last_call + random.uniform(*REQUEST_GAP) - time.monotonic()
@@ -60,23 +68,23 @@ def _throttle():
 # TLS 핸드셰이크는 한 번에 10KB 가까이 든다. 매 요청마다 새로 맺으면
 # 실제 데이터(3KB)보다 접속 비용이 더 크므로 연결을 재사용한다.
 # 테더링으로 돌릴 때 이 차이가 크다.
-_conn = None
+# 명령 스레드도 /list 로 API를 부르므로 연결은 스레드마다 따로 갖는다.
+_local = threading.local()
 API_HOST = "cgv.co.kr"
 API_PATH = "/api/v1"
 
 
 def _close_conn():
-    global _conn
-    if _conn is not None:
+    conn = getattr(_local, "conn", None)
+    if conn is not None:
         try:
-            _conn.close()
+            conn.close()
         except Exception:
             pass
-        _conn = None
+    _local.conn = None
 
 
 def api_get(path, **params):
-    global _conn
     _throttle()
     params.setdefault("coCd", CO_CD)
     url = f"{API_PATH}{path}?" + urllib.parse.urlencode(params)
@@ -92,10 +100,11 @@ def api_get(path, **params):
     # 서버가 유휴 연결을 끊었을 수 있으니 한 번은 다시 맺고 재시도한다.
     for attempt in (1, 2):
         try:
-            if _conn is None:
-                _conn = http.client.HTTPSConnection(API_HOST, timeout=20)
-            _conn.request("GET", url, headers=headers)
-            resp = _conn.getresponse()
+            conn = getattr(_local, "conn", None)
+            if conn is None:
+                conn = _local.conn = http.client.HTTPSConnection(API_HOST, timeout=20)
+            conn.request("GET", url, headers=headers)
+            resp = conn.getresponse()
             raw = resp.read()
             break
         except Exception:
@@ -231,12 +240,12 @@ def telegram_creds(cfg):
     return token, str(chat_id)
 
 
-_tg_conn = None
-
-
 def telegram_call(method, cfg, **fields):
-    """텔레그램도 getUpdates 로 매 주기 두드리므로 연결을 재사용한다."""
-    global _tg_conn
+    """연결을 재사용하되 스레드마다 따로 쓴다.
+
+    명령 스레드는 getUpdates 로 25초씩 연결을 붙들고 있으므로, 같은 연결을
+    공유하면 그동안 알림을 못 보낸다.
+    """
     token, _ = telegram_creds(cfg)
     payload = urllib.parse.urlencode(fields).encode()
     headers = {"Content-Type": "application/x-www-form-urlencoded",
@@ -244,11 +253,13 @@ def telegram_call(method, cfg, **fields):
 
     for attempt in range(3):
         try:
-            if _tg_conn is None:
-                _tg_conn = http.client.HTTPSConnection("api.telegram.org", timeout=30)
-            _tg_conn.request("POST", f"/bot{token}/{method}", body=payload,
-                             headers=headers)
-            resp = _tg_conn.getresponse()
+            conn = getattr(_local, "tg", None)
+            if conn is None:
+                conn = _local.tg = http.client.HTTPSConnection(
+                    "api.telegram.org", timeout=60)
+            conn.request("POST", f"/bot{token}/{method}", body=payload,
+                         headers=headers)
+            resp = conn.getresponse()
             raw = resp.read()
             if (resp.getheader("Content-Encoding") or "").lower() == "gzip":
                 raw = gzip.decompress(raw)
@@ -260,11 +271,13 @@ def telegram_call(method, cfg, **fields):
         except RuntimeError:
             raise
         except Exception:
-            try:
-                _tg_conn.close()
-            except Exception:
-                pass
-            _tg_conn = None
+            conn = getattr(_local, "tg", None)
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            _local.tg = None
             if attempt == 2:
                 raise
         time.sleep(3)
@@ -298,7 +311,7 @@ def telegram_alert(text, cfg, burst_key="alert_burst"):
             except Exception as exc:
                 print(f"[warn] 반복 알림 {sent + 1}번째 실패: {exc}", file=sys.stderr)
             time.sleep(float(gap))
-    print(f"[alert] {sent}회 발송")
+    log(f"알림 {sent}회 발송")
     return sent
 
 
@@ -356,10 +369,16 @@ def load_state():
         return {}
 
 
+# 조회 스레드와 명령 스레드가 같은 state 를 만지므로, 직렬화하는 동안
+# 키가 늘어나 터지는 일이 없도록 쓰기를 묶는다.
+STATE_LOCK = threading.RLock()
+
+
 def save_state(state):
+    with STATE_LOCK:
+        blob = json.dumps(state, ensure_ascii=False, indent=1, sort_keys=True)
     with open(STATE_PATH, "w", encoding="utf-8") as fp:
-        json.dump(state, fp, ensure_ascii=False, indent=1, sort_keys=True)
-        fp.write("\n")
+        fp.write(blob + "\n")
 
 
 def prune(seen):
@@ -796,7 +815,7 @@ def handle_commands(cfg, state, wait=0):
         res = telegram_call("getUpdates", cfg, offset=offset, timeout=int(wait),
                             allowed_updates=json.dumps(["message"]))
     except Exception as exc:
-        print(f"[error] getUpdates 실패: {exc}", file=sys.stderr)
+        log(f"getUpdates 실패: {exc}")
         raise
 
     for upd in res.get("result", []):
@@ -814,7 +833,7 @@ def handle_commands(cfg, state, wait=0):
         head = parts[0].split("@")[0].lower().split("_")
         cmd = head[0]
         args = [a for a in head[1:] if a] + parts[1:]
-        print(f"[cmd] /{cmd} {' '.join(args)}".rstrip())
+        log(f"/{cmd} {' '.join(args)}".rstrip())
         try:
             if cmd == "status":
                 reply = status_text(cfg, state)
@@ -831,7 +850,7 @@ def handle_commands(cfg, state, wait=0):
             telegram_send(reply, cfg)
             handled += 1
         except Exception as exc:
-            print(f"[error] /{cmd} 처리 실패: {exc}", file=sys.stderr)
+            log(f"/{cmd} 처리 실패: {exc}")
             try:
                 telegram_send(f"⚠️ <code>/{cmd}</code> 처리 중 오류\n"
                               f"<code>{type(exc).__name__}: {exc}</code>", cfg)
@@ -841,24 +860,20 @@ def handle_commands(cfg, state, wait=0):
     return handled
 
 
-def wait_for_commands(cfg, state, seconds):
-    """다음 조회까지 기다리는 동안 텔레그램을 롱폴링한다.
+def command_loop(cfg, state, stop):
+    """명령만 전담하는 스레드.
 
-    그냥 sleep 하면 명령에 답하는 데 최대 한 주기(30초)가 걸린다. 대기 시간을
-    롱폴링으로 채우면 메시지가 오는 즉시 깨어나 1초 안에 답한다.
+    조회 루프와 같은 스레드에서 돌리면 CGV 조회가 도는 동안(전체 스윕이면
+    10초 넘게 걸린다) 텔레그램을 아예 못 본다. 따로 떼어 두면 조회가 뭘 하든
+    상관없이 메시지가 오는 즉시 답한다.
     """
-    deadline = time.monotonic() + seconds
-    while True:
-        left = deadline - time.monotonic()
-        if left <= 1:
-            if left > 0:
-                time.sleep(left)
-            return
+    while not stop.is_set():
         try:
-            if handle_commands(cfg, state, wait=int(min(25, left))):
+            if handle_commands(cfg, state, wait=25):
                 save_state(state)
-        except Exception:
-            time.sleep(min(5, max(0.0, deadline - time.monotonic())))
+        except Exception as exc:
+            log(f"명령 폴링 실패, 5초 뒤 재시도: {exc}")
+            stop.wait(5)
 
 
 def check(cfg, state, notify=True, verbose=True):
@@ -940,13 +955,15 @@ def check(cfg, state, notify=True, verbose=True):
         for s in hit:
             seen.setdefault(show_key(s), now)
         keep = set(seen)
-        state[label] = {
-            "dates": dates,
-            "last_full": now_ts if full else (entry["last_full"] if entry else 0),
-            "last_seat": now_ts if (full or seat_due) else (entry["last_seat"] if entry else 0),
-            "seen": seen,
-            "seats": {k: v for k, v in seats.items() if k in keep},
-        }
+        with STATE_LOCK:
+            state[label] = {
+                "dates": dates,
+                "last_full": now_ts if full else (entry["last_full"] if entry else 0),
+                "last_seat": (now_ts if (full or seat_due)
+                              else (entry["last_seat"] if entry else 0)),
+                "seen": seen,
+                "seats": {k: v for k, v in seats.items() if k in keep},
+            }
 
         if not notify or first_run:
             # 최초 실행 때는 기존 회차를 전부 새것으로 오인해 도배하므로 알리지 않는다.
@@ -1041,21 +1058,31 @@ def main():
         state = load_state()
         deadline = time.monotonic() + args.duration if args.duration else None
         jitter = max(0.0, min(0.9, args.jitter))
-        while True:
-            interval = current_interval(with_overrides(cfg, state), args.interval)
-            try:
-                check(cfg, state)
-                save_state(state)
-            except Exception as exc:
-                print(f"[error] {exc}", file=sys.stderr)
 
-            # 매번 똑같은 초에 때리지 않도록 주기를 흔든다.
-            nap = interval * random.uniform(1 - jitter, 1 + jitter)
-            if deadline and time.monotonic() + nap >= deadline:
-                print("[loop] 지정한 실행 시간에 도달, 종료")
-                return 0
-            print(f"[loop] {nap:.1f}초 대기 (그동안 봇 명령은 즉시 응답)")
-            wait_for_commands(cfg, state, nap)
+        stop = threading.Event()
+        worker = threading.Thread(target=command_loop, args=(cfg, state, stop),
+                                  name="commands", daemon=True)
+        worker.start()
+        log("명령 대기 스레드 시작 (롱폴링)")
+
+        try:
+            while True:
+                interval = current_interval(with_overrides(cfg, state), args.interval)
+                try:
+                    check(cfg, state)
+                    save_state(state)
+                except Exception as exc:
+                    log(f"오류: {exc}")
+
+                # 매번 똑같은 초에 때리지 않도록 주기를 흔든다.
+                nap = interval * random.uniform(1 - jitter, 1 + jitter)
+                if deadline and time.monotonic() + nap >= deadline:
+                    log("지정한 실행 시간에 도달, 종료")
+                    return 0
+                log(f"{nap:.1f}초 대기")
+                stop.wait(nap)
+        finally:
+            stop.set()
 
     state = load_state()
     check(cfg, state)
