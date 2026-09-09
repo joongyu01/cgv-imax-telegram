@@ -2,14 +2,16 @@ name: CGV 예매 오픈 감시
 
 on:
   schedule:
-    # GitHub 크론의 최소 간격은 5분이라 더 짧게 적어도 무시된다.
-    # 대신 잡 하나가 4분 동안 30초마다 확인하며 살아 있어서, 실질 감지 주기는 30초다.
+    # 크론은 "잡이 하나라도 돌고 있게" 하는 방아쇠일 뿐이다. GitHub 크론은
+    # 최소 간격이 5분인 데다 자주 건너뛰기 때문에, 5분마다 깨우되 잡 하나가
+    # 55분을 살아 있게 해서 빈 시간을 없앤다.
     - cron: "*/5 * * * *"
   workflow_dispatch:
 
 concurrency:
-  # 밀린 실행을 취소하지 않고 줄 세운다. 러너가 붐벼 크론이 밀려도
-  # 대기 중이던 잡들이 이어서 돌면서 빈 시간을 메운다.
+  # 돌고 있는 잡은 건드리지 않고 다음 잡을 대기열에 세운다. 한 그룹에
+  # 대기는 한 건만 남으므로, 크론이 몇 번을 깨우든 "실행 중 1 + 대기 1" 이
+  # 유지되고, 앞 잡이 끝나는 즉시 뒤 잡이 이어받아 감시가 끊기지 않는다.
   group: cgv-watch
   cancel-in-progress: false
 
@@ -19,7 +21,7 @@ permissions:
 jobs:
   watch:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -27,11 +29,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: 예매 오픈 확인 (30초마다, 4분간)
+      - name: 예매 오픈 확인 (30초마다, 55분간)
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python cgv_watch.py --loop --interval 30 --jitter 0.4 --duration 240
+        run: python cgv_watch.py --loop --interval 30 --jitter 0.4 --duration 3300
 
       - name: 상태 저장
         if: always()
