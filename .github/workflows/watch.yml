@@ -1,11 +1,14 @@
 name: CGV 예매 오픈 감시
 
+# 자동 실행은 껐다. 로컬에서 run_local.bat 으로 상주시키는 쪽이
+# 응답이 즉각적이고, GitHub 러너를 24시간 점유하지 않아도 된다.
+# 아래 schedule 을 다시 살리면 예전처럼 GitHub 에서 돌릴 수 있다.
+#
+#   schedule:
+#     - cron: "*/5 * * * *"
+#
+# 지금은 Actions 탭에서 Run workflow 를 눌렀을 때만 돈다.
 on:
-  schedule:
-    # 크론은 "잡이 하나라도 돌고 있게" 하는 방아쇠일 뿐이다. GitHub 크론은
-    # 최소 간격이 5분인 데다 자주 건너뛰기 때문에, 5분마다 깨우되 잡 하나가
-    # 55분을 살아 있게 해서 빈 시간을 없앤다.
-    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 concurrency:

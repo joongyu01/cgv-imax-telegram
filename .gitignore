@@ -1,3 +1,5 @@
 __pycache__/
 *.pyc
 .env
+run_local.bat
+cgv-watch.log
