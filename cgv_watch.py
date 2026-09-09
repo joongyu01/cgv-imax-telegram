@@ -480,11 +480,232 @@ def report_recovery(label, cfg, state, notify):
 COMMANDS = [
     ("status", "감시 상태와 CGV API 정상 여부"),
     ("list", "지금 조건에 맞는 회차 목록"),
+    ("settings", "현재 설정 보기"),
+    ("late", "22시 이후 회차 추적 on/off"),
+    ("repeat", "취소표 알림 반복 횟수"),
+    ("window", "조회 시간대 변경"),
+    ("set", "그 밖의 값 바꾸기"),
+    ("reset", "바꾼 설정 되돌리기"),
     ("help", "명령 목록"),
 ]
 
-HELP_TEXT = ("<b>사용할 수 있는 명령</b>\n\n"
-             + "\n".join(f"/{c} — {d}" for c, d in COMMANDS))
+HELP_TEXT = (
+    "<b>사용할 수 있는 명령</b>\n\n"
+    "/status — 감시 상태와 CGV API 정상 여부\n"
+    "/list — 지금 조건에 맞는 회차 목록\n"
+    "/settings — 현재 설정 보기\n\n"
+    "<b>설정 바꾸기</b>\n"
+    "/late off — 22시 이후 회차는 추적하지 않음\n"
+    "/late on — 다시 추적\n"
+    "/repeat 3 — 취소표 알림을 3번 보냄 (1~20)\n"
+    "/window 1900 2359 — 조회 시간대를 19:00~23:59 로\n\n"
+    "바꾼 설정은 저장되어 다시 켜도 유지된다.")
+
+# 사용자가 봇으로 바꾼 값. config.json 위에 덮어씌운다.
+LATE_CUTOFF = "2159"
+
+
+def with_overrides(cfg, state):
+    """봇으로 바꾼 설정을 config.json 위에 얹은 사본을 돌려준다."""
+    ov = (state.get("_settings") or {}) if isinstance(state, dict) else {}
+    if not ov:
+        return cfg
+    merged = dict(cfg)
+    merged["filters"] = {**cfg["filters"], **ov}
+    return merged
+
+
+def settings_text(cfg, state):
+    f = with_overrides(cfg, state)["filters"]
+    days = "".join(WEEKDAY_KO[d] for d in sorted(f.get("weekdays") or range(7)))
+    late = "ON (포함)" if int(f["start_time_to"]) >= 2200 else "OFF (제외)"
+    cancel = sum(int(c) for c, _ in (f.get("cancel_alert_burst") or [[1, 0]]))
+    opens = sum(int(c) for c, _ in (f.get("alert_burst") or [[1, 0]]))
+    changed = state.get("_settings") or {}
+    lines = [
+        "<b>현재 설정</b>", "",
+        f"조회 시간대 · {hhmm(f['start_time_from'])} ~ {hhmm(f['start_time_to'])}",
+        f"요일 · {days}",
+        f"상영관 · {'/'.join(f.get('hall_keywords') or ['전체'])}",
+        f"22시 이후 회차 · {late}",
+        f"예매 오픈 알림 · {opens}회",
+        f"취소표 알림 · {cancel}회",
+        f"취소표 기준 · 한 번에 {f.get('cancel_min_seats', 2)}석 이상",
+        f"좌석 확인 주기 · {f.get('seat_watch_seconds', 60)}초",
+    ]
+    if changed:
+        lines += ["", f"<i>봇으로 바꾼 항목: {', '.join(sorted(changed))}</i>"]
+    return "\n".join(lines)
+
+
+# --- /set 으로 바꿀 수 있는 값들 -------------------------------------------
+
+def _int(lo, hi, unit=""):
+    def parse(args):
+        if len(args) != 1 or not args[0].lstrip("-").isdigit():
+            raise ValueError(f"숫자 한 개를 보내세요{unit}")
+        v = int(args[0])
+        if not lo <= v <= hi:
+            raise ValueError(f"{lo}~{hi} 사이여야 합니다")
+        return v
+    return parse
+
+
+def _hhmm_arg(args):
+    if len(args) != 1 or not (args[0].isdigit() and len(args[0]) == 4):
+        raise ValueError("HHMM 네 자리로 보내세요 (예: 1930)")
+    return args[0]
+
+
+def _hours(args):
+    vals = [a for a in " ".join(args).replace(",", " ").split() if a]
+    if len(vals) != 2 or not all(v.isdigit() for v in vals):
+        raise ValueError("시작시 끝시 두 개를 보내세요 (예: 0 6)")
+    a, b = int(vals[0]), int(vals[1])
+    if not (0 <= a <= 23 and 0 <= b <= 24):
+        raise ValueError("0~24 사이여야 합니다")
+    return [a, b]
+
+
+def _weekdays(args):
+    vals = [a for a in " ".join(args).replace(",", " ").split() if a]
+    if not vals or not all(v.isdigit() and 0 <= int(v) <= 6 for v in vals):
+        raise ValueError("0(월)~6(일) 을 쉼표나 공백으로 (예: 0,1,2,3,4)")
+    return sorted({int(v) for v in vals})
+
+
+def _halls(args):
+    vals = [a for a in " ".join(args).replace(",", " ").split() if a]
+    if not vals:
+        raise ValueError("상영관 키워드를 하나 이상 보내세요 (예: IMAX)")
+    return vals
+
+
+def _gap(args):
+    vals = " ".join(args).replace(",", " ").split()
+    try:
+        a, b = float(vals[0]), float(vals[1])
+    except (ValueError, IndexError):
+        raise ValueError("최소 최대 두 개를 보내세요 (예: 0.4 1.6)")
+    if not (0 <= a <= b <= 30):
+        raise ValueError("0~30초 사이, 최소 ≤ 최대")
+    return [a, b]
+
+
+def _burst(args):
+    n = _int(1, 20)(args)
+    return [[n, 1.0]] if n > 1 else [[1, 0]]
+
+
+def _burst_count(value):
+    return sum(int(c) for c, _ in (value or [[1, 0]]))
+
+
+def _fmt_time(v):
+    return hhmm(v)
+
+
+def _fmt_days(v):
+    return "".join(WEEKDAY_KO[d] for d in sorted(v))
+
+
+SETTINGS = {
+    # 이름:      (필터 키,               파서,             설명,                      표시 함수)
+    "interval":   ("poll_interval",      _int(10, 3600),  "폴링 주기(초)",            str),
+    "seat":       ("seat_watch_seconds", _int(15, 3600),  "좌석 확인 주기(초)",        str),
+    "full":       ("full_sweep_seconds", _int(60, 86400), "전체 스윕 주기(초)",        str),
+    "minseats":   ("cancel_min_seats",   _int(1, 50),     "취소표 판단 기준(석)",      str),
+    "from":       ("start_time_from",    _hhmm_arg,       "조회 시작 시각",            _fmt_time),
+    "until":      ("start_time_to",      _hhmm_arg,       "조회 종료 시각",            _fmt_time),
+    "weekdays":   ("weekdays",           _weekdays,       "감시 요일",                _fmt_days),
+    "halls":      ("hall_keywords",      _halls,          "상영관 키워드",             lambda v: "/".join(v)),
+    "repeat":     ("cancel_alert_burst", _burst,          "취소표 알림 횟수",          _burst_count),
+    "openrepeat": ("alert_burst",        _burst,          "예매 오픈 알림 횟수",       _burst_count),
+    "quiet":      ("quiet_hours",        _hours,          "저속 시간대(시)",           lambda v: f"{v[0]}~{v[1]}시"),
+    "quietinterval": ("quiet_interval",  _int(30, 3600),  "저속 시간대 주기(초)",      str),
+    "failafter":  ("fail_alert_after",   _int(1, 20),     "장애 알림 기준(연속 실패)",  str),
+    "gap":        ("request_gap",        _gap,            "요청 간 대기(초)",          lambda v: f"{v[0]}~{v[1]}"),
+}
+
+
+def set_help():
+    lines = ["<b>/set 으로 바꿀 수 있는 값</b>", ""]
+    f = DEFAULT_CONFIG["filters"]
+    for name, (key, _p, desc, _s) in SETTINGS.items():
+        lines.append(f"<code>/set {name}</code> — {desc}")
+    lines += ["", "예) <code>/set interval 60</code> · <code>/set seat 120</code> · "
+              "<code>/set weekdays 0,1,2,3,4</code> · <code>/set halls IMAX</code>",
+              "", "<code>/reset</code> 전체 되돌리기 · <code>/reset seat</code> 하나만"]
+    return "\n".join(lines)
+
+
+def apply_setting(cmd, args, cfg, state):
+    """설정 변경 명령을 처리하고 사용자에게 보낼 답을 돌려준다."""
+    ov = state.setdefault("_settings", {})
+    f = with_overrides(cfg, state)["filters"]
+
+    if cmd == "set":
+        if not args:
+            return set_help()
+        name = args[0].lower()
+        if name not in SETTINGS:
+            return f"모르는 항목입니다: <code>{name}</code>\n\n{set_help()}"
+        key, parse, desc, show = SETTINGS[name]
+        if len(args) == 1:
+            return (f"{desc} · 현재 <b>{show(f.get(key))}</b>\n"
+                    f"<code>/set {name} 값</code> 으로 바꾸세요.")
+        try:
+            value = parse(args[1:])
+        except ValueError as exc:
+            return f"{desc} — {exc}"
+        ov[key] = value
+        return f"{desc} → <b>{show(value)}</b>"
+
+    if cmd == "reset":
+        if not args:
+            n = len(ov)
+            ov.clear()
+            return f"바꾼 설정 {n}개를 되돌려 config.json 값으로 돌아갑니다."
+        name = args[0].lower()
+        if name not in SETTINGS:
+            return f"모르는 항목입니다: <code>{name}</code>"
+        key, _p, desc, show = SETTINGS[name]
+        ov.pop(key, None)
+        return f"{desc} → <b>{show(cfg['filters'].get(key))}</b> (config.json 값)"
+
+    if cmd == "late":
+        arg = (args[0].lower() if args else "")
+        if arg not in ("on", "off"):
+            now = "ON" if int(f["start_time_to"]) >= 2200 else "OFF"
+            return (f"22시 이후 회차 추적은 지금 <b>{now}</b> 입니다.\n"
+                    "<code>/late on</code> 또는 <code>/late off</code>")
+        if arg == "off":
+            ov["start_time_to"] = LATE_CUTOFF
+            return ("22시 이후 회차는 이제 <b>추적하지 않습니다.</b>\n"
+                    f"조회 시간대 · {hhmm(f['start_time_from'])} ~ {hhmm(LATE_CUTOFF)}")
+        ov.pop("start_time_to", None)
+        back = cfg["filters"]["start_time_to"]
+        return ("22시 이후 회차를 <b>다시 추적합니다.</b>\n"
+                f"조회 시간대 · {hhmm(f['start_time_from'])} ~ {hhmm(back)}")
+
+    if cmd == "repeat":
+        return apply_setting("set", ["repeat"] + list(args), cfg, state)
+
+    if cmd == "window":
+        if len(args) != 2:
+            return ("<code>/window 1900 2359</code> 처럼 네 자리로 두 개 보내세요.\n"
+                    "CGV는 자정 넘는 회차를 2530(새벽 1:30)처럼 적으니, "
+                    "심야까지 받으려면 2959.")
+        try:
+            lo, hi = _hhmm_arg([args[0]]), _hhmm_arg([args[1]])
+        except ValueError as exc:
+            return str(exc)
+        if int(lo) > int(hi):
+            return "시작 시각이 종료 시각보다 늦습니다."
+        ov["start_time_from"], ov["start_time_to"] = lo, hi
+        return f"조회 시간대를 <b>{hhmm(lo)} ~ {hhmm(hi)}</b> 로 바꿨습니다."
+
+    return None
 
 
 def probe_api():
@@ -498,6 +719,7 @@ def probe_api():
 
 
 def status_text(cfg, state):
+    cfg = with_overrides(cfg, state)
     ok, ms, detail = probe_api()
     lines = [f"{'✅' if ok else '⚠️'} <b>CGV API</b> — {detail} ({ms}ms)", ""]
 
@@ -533,6 +755,7 @@ def status_text(cfg, state):
 
 
 def list_text(cfg, state):
+    cfg = with_overrides(cfg, state)
     lines = []
     for raw in cfg["targets"]:
         target = resolve_target(dict(raw))
@@ -591,6 +814,10 @@ def handle_commands(cfg, state):
 
 def check(cfg, state, notify=True, verbose=True):
     """새로 열린 회차를 찾아 알린다. 알린 개수를 반환."""
+    cfg = with_overrides(cfg, state)
+    gap = cfg["filters"].get("request_gap")
+    if isinstance(gap, (list, tuple)) and len(gap) == 2:
+        REQUEST_GAP[:] = [float(gap[0]), float(gap[1])]
     total_new = 0
 
     for raw in cfg["targets"]:
@@ -710,6 +937,7 @@ def current_interval(cfg, default):
     quiet_hours 는 [시작시, 끝시] (한국시간, 끝시는 미포함). [0, 6] 이면
     00:00~05:59 동안 quiet_interval 초 주기로 돈다.
     """
+    default = int(cfg["filters"].get("poll_interval") or default)
     q = cfg["filters"].get("quiet_hours")
     if not q or len(q) != 2:
         return default
@@ -765,7 +993,7 @@ def main():
         deadline = time.monotonic() + args.duration if args.duration else None
         jitter = max(0.0, min(0.9, args.jitter))
         while True:
-            interval = current_interval(cfg, args.interval)
+            interval = current_interval(with_overrides(cfg, state), args.interval)
             try:
                 check(cfg, state)
                 handle_commands(cfg, state)
