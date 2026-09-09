@@ -1,6 +1,6 @@
 # cgv-imax-telegram
 
-CGV **용산아이파크몰 IMAX관**의 **평일 20시 이후** 회차를 지켜보다가,
+CGV **용산아이파크몰 IMAX관**의 **평일 19시 이후** 회차를 지켜보다가,
 **예매가 새로 열리거나 취소표가 풀리면** 텔레그램으로 알려주는 봇.
 
 CGV 신규 사이트(`cgv.co.kr`)의 공개 API를 주기적으로 조회해서, 직전 실행 때 없던 상영 회차가
@@ -98,7 +98,7 @@ docker run -d --restart=always \
 ```
 ✅ CGV API — 정상 응답 (312ms)
 
-감시 조건 · 월화수목금 · 20:00~23:59 · IMAX
+감시 조건 · 월화수목금 · 19:00~23:59 · IMAX
 
 용산 IMAX 오디세이
   감시 중인 회차 4개 / 상영일 7일
@@ -187,7 +187,7 @@ TimeoutError: The read operation timed out
   "filters": {
     "hall_keywords": ["IMAX"],
     "weekdays": [0, 1, 2, 3, 4],
-    "start_time_from": "2000",
+    "start_time_from": "1900",
     "start_time_to": "2359",
     "full_sweep_seconds": 300,
     "seat_watch_seconds": 60,

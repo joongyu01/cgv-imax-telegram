@@ -257,7 +257,7 @@ DEFAULT_CONFIG = {
     "filters": {
         "hall_keywords": ["IMAX"],
         "weekdays": [0, 1, 2, 3, 4],
-        "start_time_from": "2000",
+        "start_time_from": "1900",
         "start_time_to": "2359",
         "full_sweep_seconds": 300,
         "fail_alert_after": 3,
