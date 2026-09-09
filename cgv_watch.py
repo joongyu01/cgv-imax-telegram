@@ -157,6 +157,7 @@ def show_key(show):
 
 
 def format_show(show):
+    """콘솔 로그용 한 줄."""
     d = parse_ymd(show["scnYmd"])
     seats = show.get("frSeatCnt")
     total = show.get("cpSeatCnt")
@@ -164,6 +165,18 @@ def format_show(show):
     return (f"{d.strftime('%m/%d')}({WEEKDAY_KO[d.weekday()]}) "
             f"{hhmm(show.get('scnsrtTm'))}~{hhmm(show.get('scnendTm'))} "
             f"{show.get('scnsNm', '')} [{show.get('movkndDsplNm', '')}]{tail}")
+
+
+def format_show_long(show):
+    """텔레그램용. 날짜와 시작 시각을 앞에 굵게 세운다."""
+    d = parse_ymd(show["scnYmd"])
+    seats = show.get("frSeatCnt")
+    total = show.get("cpSeatCnt")
+    tail = f" · 잔여 {seats}/{total}석" if seats and total else ""
+    return (f"📅 <b>{d.year}년 {d.month}월 {d.day}일({WEEKDAY_KO[d.weekday()]}) "
+            f"{hhmm(show.get('scnsrtTm'))}</b> 시작\n"
+            f"     ~{hhmm(show.get('scnendTm'))} 종료 · "
+            f"{show.get('scnsNm', '')} · {show.get('movkndDsplNm', '')}{tail}")
 
 
 # --------------------------------------------------------------------------
@@ -199,6 +212,9 @@ def telegram_call(method, cfg, **fields):
 
 def telegram_send(text, cfg):
     _, chat_id = telegram_creds(cfg)
+    header = cfg.get("message_header")
+    if header:
+        text = f"<b>{header}</b>\n\n{text}"
     return telegram_call("sendMessage", cfg, chat_id=chat_id, text=text,
                          parse_mode="HTML", disable_web_page_preview="true")
 
@@ -465,7 +481,7 @@ def list_text(cfg, state):
             lines.append(f"<b>{label}</b>\n  조회 실패: <code>{exc}</code>")
             continue
         lines.append(f"<b>{label}</b> — 조건 일치 {len(hit)}개 (그 외 {len(miss)}개)")
-        lines += [f"• {format_show(s)}" for s in hit] or ["  (없음)"]
+        lines += [format_show_long(s) for s in hit] or ["  (없음)"]
     return "\n".join(lines) or "감시 대상이 없습니다."
 
 
@@ -600,7 +616,7 @@ def check(cfg, state, notify=True, verbose=True):
 
         if fresh:
             lines = [f"🎟 <b>예매 오픈</b> — {movie} · {site}", ""]
-            lines += [f"• {format_show(s)}" for s in fresh]
+            lines += [format_show_long(s) for s in fresh]
             if miss:
                 lines.append("")
                 lines.append(f"<i>(조건 밖 회차 {len(miss)}개는 생략)</i>")
@@ -612,7 +628,9 @@ def check(cfg, state, notify=True, verbose=True):
         if cancels:
             lines = [f"🎫 <b>취소표</b> — {movie} · {site}", ""]
             for s, delta, free in cancels:
-                lines.append(f"• {format_show(s)}\n  <b>+{delta}석</b> 풀림 → 현재 {free}석")
+                lines.append(format_show_long(s))
+                lines.append(f"     🎫 <b>{delta}석이 한 번에</b> 풀렸습니다 "
+                             f"→ 현재 {free}석 남음")
             lines.append("")
             lines.append(f'<a href="{BOOKING_URL}">CGV 예매하기</a>')
             telegram_alert("\n".join(lines), cfg)
