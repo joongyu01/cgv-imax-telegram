@@ -13,6 +13,8 @@ CGV 신규 사이트(cgv.co.kr)의 공개 BFF API를 폴링해서, 이전에 못
 """
 
 import argparse
+import gzip
+import http.client
 import json
 import os
 import random
@@ -55,17 +57,55 @@ def _throttle():
     _last_call = time.monotonic()
 
 
+# TLS 핸드셰이크는 한 번에 10KB 가까이 든다. 매 요청마다 새로 맺으면
+# 실제 데이터(3KB)보다 접속 비용이 더 크므로 연결을 재사용한다.
+# 테더링으로 돌릴 때 이 차이가 크다.
+_conn = None
+API_HOST = "cgv.co.kr"
+API_PATH = "/api/v1"
+
+
+def _close_conn():
+    global _conn
+    if _conn is not None:
+        try:
+            _conn.close()
+        except Exception:
+            pass
+        _conn = None
+
+
 def api_get(path, **params):
+    global _conn
     _throttle()
     params.setdefault("coCd", CO_CD)
-    url = f"{API}{path}?" + urllib.parse.urlencode(params)
-    req = urllib.request.Request(url, headers={
+    url = f"{API_PATH}{path}?" + urllib.parse.urlencode(params)
+    headers = {
         "User-Agent": UA,
         "Accept": "application/json",
+        # 회차 목록은 원본이 40KB인데 gzip을 붙이면 3KB로 줄어든다.
+        "Accept-Encoding": "gzip",
         "Referer": "https://cgv.co.kr/",
-    })
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        body = json.loads(resp.read().decode("utf-8"))
+        "Connection": "keep-alive",
+    }
+
+    # 서버가 유휴 연결을 끊었을 수 있으니 한 번은 다시 맺고 재시도한다.
+    for attempt in (1, 2):
+        try:
+            if _conn is None:
+                _conn = http.client.HTTPSConnection(API_HOST, timeout=20)
+            _conn.request("GET", url, headers=headers)
+            resp = _conn.getresponse()
+            raw = resp.read()
+            break
+        except Exception:
+            _close_conn()
+            if attempt == 2:
+                raise
+
+    if (resp.getheader("Content-Encoding") or "").lower() == "gzip":
+        raw = gzip.decompress(raw)
+    body = json.loads(raw.decode("utf-8"))
     if str(body.get("statusCode")) not in ("0", "200"):
         raise RuntimeError(f"CGV API {path} 실패: {body.get('statusMessage')}")
     return body.get("data")
@@ -191,20 +231,40 @@ def telegram_creds(cfg):
     return token, str(chat_id)
 
 
+_tg_conn = None
+
+
 def telegram_call(method, cfg, **fields):
+    """텔레그램도 getUpdates 로 매 주기 두드리므로 연결을 재사용한다."""
+    global _tg_conn
     token, _ = telegram_creds(cfg)
     payload = urllib.parse.urlencode(fields).encode()
-    req = urllib.request.Request(
-        f"https://api.telegram.org/bot{token}/{method}", data=payload)
+    headers = {"Content-Type": "application/x-www-form-urlencoded",
+               "Accept-Encoding": "gzip", "Connection": "keep-alive"}
+
     for attempt in range(3):
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            detail = e.read().decode("utf-8", "ignore")
-            if attempt == 2:
-                raise RuntimeError(f"텔레그램 {method} 실패 {e.code}: {detail}")
+            if _tg_conn is None:
+                _tg_conn = http.client.HTTPSConnection("api.telegram.org", timeout=30)
+            _tg_conn.request("POST", f"/bot{token}/{method}", body=payload,
+                             headers=headers)
+            resp = _tg_conn.getresponse()
+            raw = resp.read()
+            if (resp.getheader("Content-Encoding") or "").lower() == "gzip":
+                raw = gzip.decompress(raw)
+            if resp.status >= 400:
+                raise RuntimeError(
+                    f"텔레그램 {method} 실패 {resp.status}: "
+                    f"{raw.decode('utf-8', 'ignore')[:200]}")
+            return json.loads(raw.decode("utf-8"))
+        except RuntimeError:
+            raise
         except Exception:
+            try:
+                _tg_conn.close()
+            except Exception:
+                pass
+            _tg_conn = None
             if attempt == 2:
                 raise
         time.sleep(3)
@@ -219,14 +279,16 @@ def telegram_send(text, cfg):
                          parse_mode="HTML", disable_web_page_preview="true")
 
 
-def telegram_alert(text, cfg):
+def telegram_alert(text, cfg, burst_key="alert_burst"):
     """놓치면 안 되는 알림은 여러 번 연달아 보내 확실히 깨운다.
 
-    alert_burst 는 [[횟수, 간격초], ...] 형태. 기본값은 0.5초 간격 5회 +
-    1초 간격 5회. 텔레그램이 한 채팅에 초당 여러 건을 보내면 429를 줄 수
-    있는데, 그건 그 한 건만 건너뛰고 나머지는 계속 보낸다.
+    burst 설정은 [[횟수, 간격초], ...] 형태. 예매 오픈은 놓치면 끝이라
+    0.5초 5회 + 1초 5회로 몰아 보내고(alert_burst), 취소표는 수시로
+    생겼다 사라지므로 한 번만 보낸다(cancel_alert_burst). 텔레그램이 한
+    채팅에 초당 여러 건을 받으면 429를 줄 수 있는데, 그건 그 한 건만
+    건너뛰고 나머지는 계속 보낸다.
     """
-    burst = cfg["filters"].get("alert_burst") or [[1, 0]]
+    burst = cfg["filters"].get(burst_key) or [[1, 0]]
     sent = 0
     for count, gap in burst:
         for _ in range(int(count)):
@@ -265,6 +327,7 @@ DEFAULT_CONFIG = {
         "seat_watch_seconds": 60,
         "cancel_min_seats": 2,
         "alert_burst": [[5, 0.5], [5, 1.0]],
+        "cancel_alert_burst": [[1, 0]],
     },
 }
 
@@ -633,7 +696,7 @@ def check(cfg, state, notify=True, verbose=True):
                              f"→ 현재 {free}석 남음")
             lines.append("")
             lines.append(f'<a href="{BOOKING_URL}">CGV 예매하기</a>')
-            telegram_alert("\n".join(lines), cfg)
+            telegram_alert("\n".join(lines), cfg, burst_key="cancel_alert_burst")
             total_new += len(cancels)
 
     return total_new
