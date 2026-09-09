@@ -1,0 +1,40 @@
+name: CGV 예매 오픈 감시
+
+on:
+  schedule:
+    # 5분마다 (UTC 기준이지만 주기라 상관 없음). GitHub가 바쁘면 몇 분 밀릴 수 있음.
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: cgv-watch
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 예매 오픈 확인
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python cgv_watch.py
+
+      - name: 상태 저장
+        run: |
+          if [ -n "$(git status --porcelain state.json)" ]; then
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add state.json
+            git commit -m "chore: 상영 회차 상태 갱신 [skip ci]"
+            git push
+          fi

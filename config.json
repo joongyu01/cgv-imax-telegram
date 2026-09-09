@@ -1,0 +1,17 @@
+{
+  "targets": [
+    {
+      "name": "용산 IMAX 오디세이",
+      "site_no": "0013",
+      "site_name": "용산아이파크몰",
+      "mov_no": "30001323",
+      "movie_name": "오디세이"
+    }
+  ],
+  "filters": {
+    "hall_keywords": ["IMAX"],
+    "weekdays": [0, 1, 2, 3, 4],
+    "start_time_from": "2000",
+    "start_time_to": "2359"
+  }
+}
